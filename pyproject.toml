@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enterprise-knowledge-brain"
+version = "0.2.0"
+description = "GraphRAG and multi-agent enterprise knowledge service"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+  "fastapi>=0.115.6",
+  "uvicorn[standard]>=0.29.0",
+  "openai>=1.32.0",
+  "langgraph>=0.2.70",
+  "langgraph-checkpoint-redis>=0.0.2",
+  "langchain-core>=0.2.43",
+  "typing-extensions>=4.9.0",
+  "pdfplumber>=0.10.0",
+  "neo4j>=5.0.0",
+  "pymilvus>=2.4.0",
+  "sentence-transformers>=3.0.0",
+  "setuptools<81",
+  "pydantic>=2.8.2",
+  "pydantic-settings>=2.2.0",
+  "python-dotenv>=1.0.0",
+  "rich>=13.0.0",
+  "redis>=5.2.1",
+  "ragas>=0.1.14",
+  "langsmith>=0.1.112",
+  "datasets>=2.15.0",
+  "langchain-openai>=0.1.17",
+  "langchain-community>=0.2.11",
+  "pandas>=2.0.0",
+  "mcp>=1.0.0",
+  "sqlalchemy>=2.0.0",
+  "docker>=7.1.0",
+  "duckduckgo-search>=5.0.0",
+  "playwright>=1.43.0",
+  "beautifulsoup4>=4.12.0",
+  "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.8",
+  "ruff>=0.6.0",
+  "mypy>=1.10.0",
+]
+
+[tool.setuptools]
+packages = ["agents", "api", "core", "evaluation", "graphrag", "mcp_servers", "memory", "tools", "utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --basetemp=.pytest_tmp"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+exclude = ["BAAI", ".pytest_cache", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501", "F401"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "skip"
+check_untyped_defs = false
+warn_unused_ignores = false
+disable_error_code = ["import-untyped"]
+exclude = "(BAAI|__pycache__|\\.pytest_cache|\\.pytest_tmp)"

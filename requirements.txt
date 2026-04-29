@@ -1,0 +1,57 @@
+# API 后端
+fastapi>=0.115.6
+uvicorn[standard]>=0.29.0
+
+# LLM: DeepSeek V3（OpenAI 兼容接口，无需 langchain）
+openai>=1.32.0
+
+# Agent 编排：LangGraph 状态机（第二阶段新增）
+langgraph>=0.2.70
+langgraph-checkpoint-redis>=0.0.2
+langchain-core>=0.2.43
+typing-extensions>=4.9.0
+
+# PDF 解析（对中文段落和表格比 pypdf 更稳健）
+pdfplumber>=0.10.0
+
+# 图谱数据库
+neo4j>=5.0.0
+
+# 向量数据库（pymilvus 2.4+ 支持 MilvusClient 新 API）
+pymilvus>=2.4.0
+
+# Embedding（本地推理，中英双语 SOTA，1024 维）
+sentence-transformers>=3.0.0
+
+# 配置与工具
+setuptools<81
+pydantic>=2.8.2
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.0
+rich>=13.0.0
+redis>=5.2.1
+
+# 评估与监控（第五阶段）
+ragas>=0.1.14
+langsmith>=0.1.112
+datasets>=2.15.0
+langchain-openai>=0.1.17
+langchain-community>=0.2.11
+pandas>=2.0.0
+
+# MCP (Model Context Protocol)
+mcp>=1.0.0
+
+# DB 工具（供 tools/ 模块使用）
+sqlalchemy>=2.0.0
+
+# 测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.8
+httpx>=0.27.0
+docker>=7.1.0
+
+# 外部情报与联网搜索 Web Researcher
+duckduckgo-search>=5.0.0
+playwright>=1.43.0
+beautifulsoup4>=4.12.0
