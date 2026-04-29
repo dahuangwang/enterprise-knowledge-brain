@@ -212,12 +212,15 @@ def create_mcp_worker_node(worker_name: str):
     """根据 worker_name 动态生成对应的异步 Node 函数"""
     # 动态生成worker节点
     async def dynamic_worker_node(state: AgentState) -> Dict[str, Any]:
+        # await是等待generic_mcp_worker执行完成并返回结果
         return await generic_mcp_worker(state, worker_name)
     
     # 修改函数的 __name__ 以便于调试和日志追踪
     dynamic_worker_node.__name__ = f"{worker_name.lower()}_node"
     return dynamic_worker_node
 
+#  async是Python中的异步函数关键字，用于定义异步函数
+#  start_report_task是异步函数，需要使用await来调用
 async def report_generator_worker_node(state: AgentState) -> Dict[str, Any]:
     logger.info("--> [Node] 探测到长报告需求，触发异步 Report Agent...")
     from agents.report_agent import start_report_task
@@ -227,7 +230,7 @@ async def report_generator_worker_node(state: AgentState) -> Dict[str, Any]:
     task_id = f"rep-{uuid.uuid4().hex[:8]}"
     topic = state["question"]
     
-    # 触发异步长报告任务
+    # 触发异步长报告任务，start_report_task返回结果是Future对象，Future对象代表一个异步操作的结果
     asyncio.create_task(
         start_report_task(
             task_id, 
@@ -241,6 +244,7 @@ async def report_generator_worker_node(state: AgentState) -> Dict[str, Any]:
     msg = f"已为您自动切换到异步长报告生成模式。任务ID: `{task_id}`。\n请稍后调用 `/report/{task_id}/status` 检查进度或进行大纲审核。"
     return {"messages": [AIMessage(content=msg)]}
 
+# Summarizer 节点是合并所有worker返回结果的节点，调用llm对所有结果进行汇总
 def summarizer_node(state: AgentState) -> Dict[str, Any]:
     logger.info("--> [Node] 真实的 Summarizer 正在汇总报告...")
     _llm = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
