@@ -1,161 +1,494 @@
-# Enterprise Knowledge Brain 一站式企业级知识图谱决策大脑
+# Enterprise Knowledge Brain
 
-基于 GraphRAG、LangGraph、Neo4j、Milvus 和 DeepSeek 构建的多 Agent 协同架构，具备复杂商业级业务报表查询、动态业务接口集成和双路降级检索能力的问答引擎。
+企业级知识图谱决策大脑。项目基于 GraphRAG、LangGraph、MCP、FastAPI、Neo4j、Milvus、Redis 和 OpenAI 兼容大模型接口构建，面向企业内部知识问答、结构化报表查询、内部业务接口调用、联网情报检索、数据分析绘图和长报告生成等场景。
 
----
+## 目录
 
-## 1. 系统组件 (System Components)
+- [项目简介](#项目简介)
+- [核心功能](#核心功能)
+- [系统特点](#系统特点)
+- [技术栈](#技术栈)
+- [架构概览](#架构概览)
+- [快速开始](#快速开始)
+- [数据建库](#数据建库)
+- [API 接口](#api-接口)
+- [MCP Worker](#mcp-worker)
+- [项目结构](#项目结构)
+- [配置说明](#配置说明)
+- [测试与评估](#测试与评估)
+- [生产部署建议](#生产部署建议)
+- [许可证](#许可证)
 
-企业级知识大脑系统采用了模块化解耦架构，划分为以下五个核心层：
+## 项目简介
 
-* **接入与网关层 (Gateway Layer):**
-    * 采用 **FastAPI** 提供高性能的异步 HTTP 接口（`/query`, `/index`）。
-    * 预备用于多路并发支持及 Token 速率限制机制的承载。
-* **Agent 编排层 (Orchestration Layer):**
-    * 使用 **LangGraph** 管理各个 Agent 之间的有向无环图（DAG）状态流转与拓扑任务调度。
-    * 现有核心智能体：
-      - **GraphRAG Agent**（处理非结构化文档/图谱三元组数据的提取与融合检索）。
-      - **Planner Agent**（全局指挥枢纽，负责对用户的复杂多维问题作意图分解、构建并分配子任务给底端领域执行器们串行解决）。
-      - **SQL Agent**（结构化数据分析与报表探测器：生成内控 `SELECT` SQL 获取本地受限 SQLite 沙盒中的财务报表等关键性指标）。
-      - **API Agent**（内部业务网关整合器：可模拟寻找和调用相应的 Restful API 来反馈动态业务流，如实时打捞企业待审核单据状态等）。
-      - **WebResearcher Agent**（互联网情报收集与多步推理代理，获取最新的外部资讯）。
-      - **DataAnalysis Agent**（利用沙盒环境执行生成的 Python 代码，进行复杂的数据分析与可视化）。
-* **知识引擎层 (Knowledge Engine - 核心壁垒):**
-    * **图数据库 (GraphDB):** Neo4j，存储实体及拓扑网络（节点标签 `Entity`，关系标签 `RELATION`）。通过深度图游走探索公司间隐含合作关联等链条关系。
-    * **向量数据库 (VectorDB):** Milvus (Standalone)，缓存文档切片语义向量（支持高准确高维查阅 `IVF_FLAT` 索引及 `COSINE` 相似度验证）。
-    * **离线建库引擎:** 包含能够自动执行 PDF -> 结构化切分拆解抽取 -> Neo4j & Milvus 推送动作的全套自动化管道。
-    * **Embedding 模型:** `BAAI/bge-m3`（本地托管零远程泄露推理，超强单模型兼融长短上下文双语能力）。
-* **可观测性与独立评估层 (Observability & Evaluation):**
-    * **Tracing:** 基于 `@traceable` 透明引入的 LangSmith 系统监控大盘，能直通并绘制底层所有的调用链路径及每一个提示词步骤开销度。
-    * **Evaluation:** 脱离于人工审美的纯机器审计评委。整合了独立第三方工具 Ragas 基于独立裁判模型判断执行管线是否在胡编乱造 （Faithfulness）与答非所问（Answer Relevance），并将客观分数存入机器评审表内。
+Enterprise Knowledge Brain 将企业内部的非结构化文档、图谱关系、结构化数据库、内部系统接口和外部互联网情报统一纳入一个多 Agent 调度体系中。用户只需要提出自然语言问题，Supervisor 会根据问题类型动态发现可用 Worker，并通过 MCP 工具调用完成数据检索、分析和最终回答合成。
 
----
+系统支持两类运行模式：
 
-## 2. 请求处理主链路 (Main Request Pipeline)
+- `demo`：使用本地模拟 SQL 数据和内部 API，适合本地开发、演示和单元测试。
+- `production`：连接真实业务数据库与内部 API 网关，适合企业环境集成。
 
-单次对话查询请求的完整执行拓扑链：
+## 核心功能
 
-1. **复杂意图规划与解耦 (Multi-Agent Orchestration):**
-   用户复杂指令到达 `planner_agent.py` ，提取可单点突破的目标域任务分包并放入栈列。
-2. **底层专用域代理响应 (Task Execution Dispatch):** 
-   若判定涉及结构沙盘，打给 `SQL Agent` 或 `DataAnalysis Agent`；若判定打通现有接口，打给 `API Agent`；若需要联网查询外部资讯，打给 `WebResearcher Agent`；若需要翻找年金财报或内部图谱关系信息，抛还给混合检索主力 `GraphRAG Agent`。长报告需求交由专门的 `Report Generator Worker` 异步处理。各处理结果将在上下文空间栈重叠聚合以便应对接续的环节。
-3. **知识检索引擎的细分 (Query Rewriting & Routing):** 针对 GraphRAG
-   先执行口语标准化纠正缩写；将纠偏后结果交给大模型决定后续的走线（`vector_search` 负责单纯名词主题，`graph_search` 负责纯实体嵌套网络、`hybrid_search` 全部并发结合）。
-4. **统一生成与幻觉拦截 (Decision Synthesis):** 
-   收集到各路返回之后由上层 Planner 汇总综合回答；如果知识库或各子系统无回执，强制大模型闭嘴承认数据真空状态。
+### 1. GraphRAG 知识库问答
 
----
+- 支持 PDF 离线建库：PDF 解析、滑动窗口切块、实体关系抽取、Neo4j 图谱写入、Milvus 向量写入。
+- 查询链路包含查询重写、实体识别、检索路由、向量检索、图谱检索、混合检索和回答合成。
+- 支持 Neo4j N-hop 图谱邻域展开，适合实体关系、投资关系、合作链路、上下游依赖等问题。
+- 支持 Milvus 向量检索，适合语义主题、政策条款、文档段落和上下文追溯。
 
-## 3. 目录与各模块功能说明 (Project Layout)
+### 2. 多 Agent 调度
+
+- 使用 LangGraph 构建 Supervisor 工作流。
+- 使用 Redis 保存 LangGraph checkpoint、AgentCard 注册信息和查询缓存。
+- 通过 MCP Streamable HTTP 挂载独立 Worker，Supervisor 可动态发现并调用工具。
+- 支持并行调度多个 Worker，例如同时查询财务报表、内部审批状态和企业知识库。
+
+### 3. 结构化数据查询
+
+- SQL Worker 提供只读 SQL 查询能力。
+- `demo` 模式内置 SQLite 演示表 `financial_reports`。
+- `production` 模式通过 `BUSINESS_SQL_DATABASE_URL` 连接真实只读业务数据源。
+- SQL 执行器限制非 `SELECT` 语句，拦截 `DROP`、`INSERT`、`UPDATE`、`DELETE` 等危险操作。
+
+### 4. 内部业务 API 集成
+
+- API Worker 提供项目审批、部门预算、员工工单等内部接口能力。
+- `demo` 模式使用本地函数模拟业务系统响应。
+- `production` 模式转发到 `INTERNAL_API_BASE_URL` 指定的真实服务。
+
+### 5. 联网情报检索
+
+- WebSearch Worker 支持多步联网检索。
+- 使用 DuckDuckGo 搜索候选结果。
+- 使用 Playwright 抓取动态网页正文。
+- 使用 LLM 对网页内容进行压缩摘要，并生成来源可追溯的情报报告。
+
+### 6. 数据分析与可视化
+
+- DataAnalysis Worker 可根据上下文数据和用户指令生成 Python 分析代码。
+- 使用本地 OpenAI 兼容代码模型接口，默认配置为 `Qwen/Qwen2.5-Coder-32B-Instruct`。
+- 在 Docker 隔离沙盒中执行 Python 代码，限制网络、内存和 CPU。
+- 支持输出 stdout、stderr 和 base64 内嵌图表。
+
+### 7. 长报告生成
+
+- Report Agent 支持异步长报告生成。
+- 使用 LangGraph 构建大纲规划、人工确认、分章节起草、全文组装流程。
+- 支持人工审核大纲后继续执行。
+- 支持 Markdown 和 PDF 下载。
+
+### 8. 可观测性与评估
+
+- 支持 LangSmith tracing。
+- 支持 RAGAS 自动化评估，输出 `evaluation/audit_report.csv`。
+- 提供 Faithfulness 和 Answer Relevance 等指标，用于检验 RAG 回答质量。
+
+## 系统特点
+
+- **GraphRAG 双引擎检索**：Neo4j 负责实体关系和图谱拓扑，Milvus 负责语义相似度检索，两者可按问题类型独立或混合使用。
+- **MCP 解耦架构**：每个 Worker 独立暴露 MCP 工具，主应用只维护连接池和调度逻辑，便于横向扩展。
+- **动态服务发现**：Worker 启动后向 Redis 注册 AgentCard，Supervisor 根据在线 Worker 动态生成路由候选。
+- **并行任务派发**：复杂问题可同时分发给多个 Worker，降低串行调用耗时。
+- **安全边界明确**：SQL 只读限制、Python Docker 沙盒、生产环境 CORS 校验和真实适配器强校验。
+- **配置集中管理**：通过 Pydantic Settings 统一读取 `.env`，避免密钥散落在代码中。
+- **本地 Embedding 推理**：默认使用 `BAAI/bge-m3`，减少文档向量化阶段的数据外泄风险。
+- **可测试性强**：核心 Agent、GraphRAG、Indexer、SQL/API 工具均支持依赖注入和 mock 测试。
+- **支持演示与生产切换**：`APP_PROFILE=demo` 适合快速验证，`APP_PROFILE=production` 强制配置真实数据源和内部 API。
+
+## 技术栈
+
+| 类别 | 技术 |
+| --- | --- |
+| Web 框架 | FastAPI, Starlette, Uvicorn |
+| Agent 编排 | LangGraph, LangChain Core |
+| 工具协议 | MCP Streamable HTTP |
+| 大模型接口 | OpenAI SDK, DeepSeek OpenAI-compatible API |
+| 图数据库 | Neo4j |
+| 向量数据库 | Milvus Standalone |
+| Embedding | sentence-transformers, BAAI/bge-m3 |
+| 缓存与注册中心 | Redis |
+| PDF 解析 | pdfplumber |
+| 联网检索 | duckduckgo-search, Playwright, BeautifulSoup |
+| 数据分析沙盒 | Docker SDK, pandas, matplotlib, seaborn |
+| 评估 | RAGAS, LangSmith, datasets |
+| 测试 | pytest, pytest-asyncio |
+
+## 架构概览
+
+```mermaid
+flowchart TD
+    User[User / Client] --> API[FastAPI Gateway]
+    API --> Supervisor[LangGraph Supervisor]
+    Supervisor --> Registry[Redis AgentCard Registry]
+    Supervisor --> Cache[Redis Checkpoint / Exact Cache]
+
+    Supervisor --> MCPAPI[API Worker MCP]
+    Supervisor --> MCPSQL[SQL Worker MCP]
+    Supervisor --> MCPRAG[GraphRAG Worker MCP]
+    Supervisor --> MCPData[DataAnalysis Worker MCP]
+    Supervisor --> MCPWeb[WebSearch Worker MCP]
+    Supervisor --> Report[Report Agent]
+
+    MCPRAG --> Neo4j[(Neo4j GraphDB)]
+    MCPRAG --> Milvus[(Milvus VectorDB)]
+    MCPRAG --> LLM[OpenAI-compatible LLM]
+
+    MCPSQL --> DemoSQL[(Demo SQLite)]
+    MCPSQL --> ProdSQL[(Production SQL DB)]
+
+    MCPAPI --> DemoAPI[Demo API Adapter]
+    MCPAPI --> ProdAPI[Internal API Gateway]
+
+    MCPData --> Sandbox[Docker Python Sandbox]
+    MCPWeb --> Internet[Search / Web Pages]
+```
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.10+
+- Docker 和 Docker Compose
+- DeepSeek API Key 或其他 OpenAI 兼容模型服务
+- 可选：本地 vLLM 代码模型服务，用于 DataAnalysis Worker
+
+### 1. 克隆并安装依赖
+
+```bash
+git clone <your-repo-url>
+cd enterprise-knowledge-brain
+
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+如需以可编辑包方式安装：
+
+```bash
+pip install -e ".[dev]"
+```
+
+联网检索功能需要安装浏览器运行时：
+
+```bash
+playwright install chromium
+```
+
+### 2. 配置环境变量
+
+```bash
+cp .env.example .env
+```
+
+至少需要设置：
+
+```env
+APP_PROFILE=demo
+DEEPSEEK_API_KEY=your_api_key
+NEO4J_PASSWORD=your_neo4j_password
+```
+
+首次加载 `BAAI/bge-m3` 会下载模型文件。如 HuggingFace 访问受限，可设置：
+
+```env
+HF_ENDPOINT=https://hf-mirror.com
+```
+
+### 3. 使用 Docker Compose 启动完整系统
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+默认服务端口：
+
+| 服务 | 地址 |
+| --- | --- |
+| FastAPI Gateway | http://localhost:8000 |
+| Swagger UI | http://localhost:8000/docs |
+| API Worker MCP | http://localhost:8001/mcp |
+| SQL Worker MCP | http://localhost:8002/mcp |
+| GraphRAG Worker MCP | http://localhost:8003/mcp |
+| DataAnalysis Worker MCP | http://localhost:8004/mcp |
+| WebSearch Worker MCP | http://localhost:8005/mcp |
+| Neo4j Browser | http://localhost:7474 |
+| Milvus SDK | localhost:19530 |
+| Redis | localhost:6379 |
+| MinIO Console | http://localhost:9001 |
+
+### 4. 本地开发方式启动
+
+如果只希望在本机运行 Python 服务，可先启动基础设施：
+
+```bash
+docker compose up -d neo4j redis etcd minio milvus-standalone
+```
+
+然后分别启动 MCP Worker：
+
+```bash
+python -m mcp_servers.api_server
+python -m mcp_servers.sql_server
+python -m mcp_servers.graphrag_server
+python -m mcp_servers.data_analysis_server
+python -m mcp_servers.web_search_server
+```
+
+最后启动主应用：
+
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## 数据建库
+
+通过 CLI 执行 PDF 建库：
+
+```bash
+python -m graphrag.indexer --pdf ./data/annual_report.pdf
+```
+
+只解析并打印抽取结果，不写入 Neo4j 和 Milvus：
+
+```bash
+python -m graphrag.indexer --pdf ./data/annual_report.pdf --dry-run
+```
+
+也可以通过 HTTP 触发后台建库：
+
+```bash
+curl -X POST http://localhost:8000/index \
+  -H "Content-Type: application/json" \
+  -d '{"pdf_path":"./data/annual_report.pdf","dry_run":false}'
+```
+
+## API 接口
+
+### 健康检查
+
+```http
+GET /health
+```
+
+返回 Neo4j 和 Milvus 的连接状态。
+
+### 企业问答
+
+```http
+POST /query
+Content-Type: application/json
+
+{
+  "question": "请查询招商银行极速开户系统的投入情况，并说明审批状态"
+}
+```
+
+返回字段包括：
+
+- `question`：原始问题
+- `normalized`：标准化查询，GraphRAG 链路会返回该字段
+- `entities`：识别出的实体
+- `route`：检索或调度策略
+- `answer`：最终回答
+- `vector_hits`：向量检索命中数
+- `graph_stats`：图谱检索统计
+- `elapsed_ms`：请求耗时
+- `error`：错误信息
+
+### 图谱实体查询
+
+```http
+GET /graph/entities?entity_type=公司&limit=50
+```
+
+### 图谱关系查询
+
+```http
+GET /graph/relations?relation_type=投资&entity_name=招商&limit=50
+```
+
+### 长报告生成
+
+创建报告任务：
+
+```http
+POST /report/generate
+Content-Type: application/json
+
+{
+  "topic": "企业智能风控平台建设分析报告",
+  "requirements": "包含预算、技术路线、风险和实施建议"
+}
+```
+
+查询状态：
+
+```http
+GET /report/{task_id}/status
+```
+
+审批大纲：
+
+```http
+POST /report/{task_id}/outline/approve
+Content-Type: application/json
+
+{
+  "approved_outline": [
+    {
+      "title": "项目背景",
+      "purpose": "说明建设背景、业务痛点和目标"
+    }
+  ]
+}
+```
+
+下载报告：
+
+```http
+GET /report/{task_id}/download?format=pdf
+GET /report/{task_id}/download?format=markdown
+```
+
+### A2A 服务发现
+
+```http
+GET /agents
+```
+
+返回当前 Redis 注册中心中仍然在线的 AgentCard 列表。
+
+## MCP Worker
+
+| Worker | 端口 | 工具 | 功能 |
+| --- | --- | --- | --- |
+| API_Worker | 8001 | `get_approval_status`, `get_department_budget`, `get_employee_tickets` | 内部项目审批、预算、工单查询 |
+| SQL_Worker | 8002 | `execute_financial_sql` | 只读财务报表查询 |
+| GraphRAG_Worker | 8003 | `ask_enterprise_knowledge_base` | 企业知识库图谱和向量检索 |
+| DataAnalysis_Worker | 8004 | `run_analysis_and_plot` | Python 数据分析和图表生成 |
+| WebSearch_Worker | 8005 | `conduct_web_research` | 联网搜索、网页抓取和情报报告 |
+
+Worker 启动后会向 Redis 写入 `agentcard:{agent_id}`，并通过心跳续期。主应用启动时建立 MCP 长连接池，并将工具列表交给 Supervisor 做函数调用路由。
+
+## 项目结构
 
 ```text
 enterprise-knowledge-brain/
-│
-├── api/                        # HTTP 对外服务接口层
-│   ├── routes.py               #   - 搭载 FastAPI 预留的异步网络收录门户
-│
-├── core/                       # 核心基础设施与运行时配置
-│   ├── config.py               #   - 基于 pydantic-settings 进行依赖属性强解耦，覆盖连接串/重试率/溯源指标与各项 Token Limit。
-│   └── logger.py               #   - 使用 Rich 库输出对工程师终端友好的染色高亮统一日志结构
-│
-├── agents/                     # 协作 Agent 多大脑编排与定义
-│   ├── prompts.py              #   - 【重点】统一集中剥离的 Prompt 工厂与基于 Pydantic 的 Json Mode JsonSchema 控制器。
-│   ├── planner_agent.py        #   - 拓扑依赖编排层，指挥下方所有工具的调度元首。
-│   ├── graphrag_agent.py       #   - 高度独立并内置了双路回落机制的纯文本解析搜查代理。
-│   ├── sql_agent.py            #   - 生成极低幻觉概率并且确保生成 SQLite 规范方言的执行机器。
-│   ├── api_agent.py            #   - 参数指派拦截与系统对接员。
-│   ├── web_researcher_agent.py #   - 联网多步搜索与情报收集专家。
-│   └── report_agent.py         #   - 异步长篇距报告撰写与人机提纲确认节点。
-│
-├── graphrag/                   # 核心图算引擎和入库处理层
-│   ├── indexer.py              #   - 大满贯流水线（支持本地 PDF 按需分解与自动 Neo4j 构建流）
-│   └── graph_search.py         #   - 根据图模式建立 n-hop 子图追踪（Breadth First Search 等提取算法集合）
-│
-├── tools/                      # 被外部执行器们包裹的实战运行端/网关
-│   ├── sql_executor.py         #   - 对大语言模型传回来的文字实施限制性的查询过滤投递
-│   └── internal_apis.py        #   - 对大模型传来的 Json 负载提供本地拦截和映射反馈执行
-│
-├── evaluation/                 # 旁路评分裁定体系
-│   ├── evaluator.py            #   - 内置一套裁判模型实例，负责将已跑飞完毕的内容反向投递进 RAGAS 获得最终性能量化分数。
-│   └── audit_report.csv        #   - 持久的审校溯源分数日志档案。
-│
-└── tests/                      # 基于 PyTest 构建的高测试率单元矩阵
+├── agents/                 # LangGraph Agent 与多 Agent 调度逻辑
+│   ├── planner_agent.py    # Supervisor，动态发现 Worker 并调度 MCP 工具
+│   ├── graphrag_agent.py   # GraphRAG 查询链路
+│   ├── report_agent.py     # 异步长报告生成
+│   ├── web_researcher_agent.py
+│   ├── sql_agent.py
+│   ├── api_agent.py
+│   └── prompts.py
+├── api/
+│   └── routes.py           # FastAPI 路由和请求响应模型
+├── core/
+│   ├── config.py           # Pydantic Settings 配置
+│   ├── logger.py           # Rich 日志
+│   └── registry.py         # Redis AgentCard 注册中心
+├── evaluation/
+│   └── evaluator.py        # RAGAS 评估流水线
+├── graphrag/
+│   ├── indexer.py          # PDF 建库流水线
+│   ├── graph_search.py     # Neo4j 图谱检索
+│   ├── prompts.py
+│   └── skills.py
+├── mcp_servers/            # MCP Streamable HTTP Worker 服务
+├── memory/                 # 记忆模块占位
+├── scripts/
+│   └── run_eval.py         # 自动化评估入口
+├── tests/                  # pytest 单元测试
+├── tools/                  # SQL、API、Python 沙盒和 Web 工具
+├── utils/                  # Redis、语义缓存、事件发布、PDF 导出
+├── docker-compose.yml      # 应用、MCP Worker 与基础设施编排
+├── Dockerfile
+├── main.py                 # FastAPI 应用入口
+├── pyproject.toml
+├── requirements.txt
+└── .env.example
 ```
 
----
+## 配置说明
 
-## 4. 部署与本地运行方式
+关键环境变量如下：
 
-系统高度解耦并且全链采用本地模型推理，具备轻量化的部署优势。
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `APP_PROFILE` | `demo` | 运行模式，支持 `demo` 和 `production` |
+| `DEEPSEEK_API_KEY` | 无 | OpenAI 兼容大模型 API Key |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI 兼容接口地址 |
+| `DEEPSEEK_MODEL` | `deepseek-chat` | 大模型名称 |
+| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt 地址 |
+| `NEO4J_USER` | `neo4j` | Neo4j 用户名 |
+| `NEO4J_PASSWORD` | 无 | Neo4j 密码 |
+| `MILVUS_HOST` | `localhost` | Milvus 主机 |
+| `MILVUS_PORT` | `19530` | Milvus 端口 |
+| `MILVUS_COLLECTION` | `enterprise_docs` | Milvus collection |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | 本地 Embedding 模型 |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis 地址 |
+| `BUSINESS_SQL_DATABASE_URL` | 空 | 生产模式真实业务数据库地址 |
+| `INTERNAL_API_BASE_URL` | 空 | 生产模式内部 API 网关地址 |
+| `VLLM_BASE_URL` | `http://localhost:8000/v1` | 本地代码模型 OpenAI 兼容地址 |
+| `VLLM_MODEL_NAME` | `Qwen/Qwen2.5-Coder-32B-Instruct` | 数据分析代码生成模型 |
+| `LANGCHAIN_TRACING_V2` | `false` | 是否启用 LangSmith tracing |
+| `LANGCHAIN_API_KEY` | 空 | LangSmith API Key |
 
-### 4.1 环境结构依赖
+生产模式会强制校验：
 
-启动本项目之前请确保本地有 **Docker Compose** 以及 **Python 3.10+**。
+- `CORS_ALLOW_ORIGINS` 不能包含 `*`
+- 必须配置 `BUSINESS_SQL_DATABASE_URL`
+- 必须配置 `INTERNAL_API_BASE_URL`
+
+## 测试与评估
+
+运行单元测试：
 
 ```bash
-# 1. 复制全局参数预设档
-cp .env.example .env
-
-# 2. 修改配置项
-# 请使用文本编辑器打开 .env，并将您的 DEEPSEEK_API_KEY （支持兼容 OpanAI 等额接口）填入其中。
-
-# 3. 配置 Python 包
-pip install -r requirements.txt
-# (注: `sentence-transformers` 首次初始化需要从 HuggingFace Hub 下载 2.3GB `BAAI/bge-m3`。
-# 国内网络如果不通畅，建议终端配置: $env:HF_ENDPOINT="https://hf-mirror.com")
+pytest
 ```
 
-### 4.2 运行核心数据库设施 (Neo4j + Milvus)
-
-系统基于一套 `docker-compose.yml` 把控所有外储平台资源。
+运行指定测试：
 
 ```bash
-# 拉起全部后台数据容器，该流程会自动部署 Milvus, Neo4j
-docker-compose up -d
-
-# 检查健康状况确保全部绿灯
-docker-compose ps
+pytest tests/test_graphrag_agent.py -v
+pytest tests/test_indexer.py -v
+pytest tests/test_sql_api_agents.py -v
 ```
 
-### 4.3 文档注入（测试数据初始化）
-
-系统自带建库解析代码能够独立识别并转换原始业务文档材料入图与缓存。
+联网测试默认跳过。如需运行 Web Researcher 测试：
 
 ```bash
-# 执行完整入库全流程，将会自动写入 Neo4j 与 Milvus
-python -m graphrag.indexer --pdf data/xxxx.pdf
-
-# 如果担心成本，可以仅使用纯推演而不做最后一次数据写表 (dry run mode)
-python -m graphrag.indexer --pdf data/xxxx.pdf --dry-run
+RUN_WEB_TESTS=1 pytest tests/test_web_agent.py -v
 ```
 
-### 4.4 代码运行交互点指令集合
-
-项目可支持纯脚本态执行、HTTP Server 对外态执行，和基准评率报告生成执行。
+运行 RAGAS 自动评估：
 
 ```bash
-# [选项A]: 独立作为本地应用入口发起测试（基于编排主管层切入）
-python
->>> from agents.planner_agent import run_planner
->>> result = run_planner("请帮我核对该系统的最新建设审批流情况和内部总投资金报表。")
->>> print(result["final_answer"])
-
-# [选项B]: 通过 FastAPI 以 Http 微服务态提供对外可调用能力
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-# 文档访问：http://127.0.0.1:8000/docs
-# 接口请求示例: POST /query {"question": "招行各项科研项目今年状态？"}
-
-# [选项C]: 脱离业务进行独立全套自动化评分验收与审计文件生成（第五阶段考核支持点）
 python scripts/run_eval.py
 ```
 
-### 4.5 可观测仪表盘（Tracing配置） - 选配
+评估结果会追加写入：
 
-通过注册并且设定在您的系统全局 `LangSmith` 控制参数：
-```ini
-# (位于您的 .env 内部)
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=ls__xxxx_您的平台私钥_xxxx
-LANGCHAIN_PROJECT=EnterpriseKnowledgeBrain
+```text
+evaluation/audit_report.csv
 ```
-系统后续运行过程中所有的 Agent 回退与分叉重试等内耗明细都可以跨云在图形工作台中被监控到，且零代码侵入。
+
+## 生产部署建议
+
+- 使用 `APP_PROFILE=production`，接入真实只读数据库和内部 API 网关。
+- 为业务数据库账号配置最小权限，只授予必要的只读查询权限。
+- 将 `DEEPSEEK_API_KEY`、`NEO4J_PASSWORD`、数据库连接串等敏感配置交给密钥管理系统注入。
+- 为 MCP Worker、FastAPI Gateway、Neo4j、Milvus 和 Redis 配置独立监控与日志采集。
+- 为 `/query` 增加企业级认证鉴权，目前代码通过 `X-OIDC-User` 读取网关透传用户。
+- 对 DataAnalysis Worker 的 Docker 沙盒镜像、执行超时、资源限制和输出目录进行安全审计。
+- 在生产评估中扩展 GraphRAG 返回原始检索上下文，再启用严格的 RAGAS faithfulness 审计。
+
+## 许可证
+
+当前仓库未声明开源许可证。请在发布或商用前补充 `LICENSE` 文件，并明确代码、模型、数据和文档的使用边界。
