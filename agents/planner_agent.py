@@ -44,9 +44,10 @@ class AgentState(TypedDict):
     completed_tasks: Annotated[List[str], operator.add] # 必须有，用来存储已经完成的任务
     question: str # 必须有，用来存储用户的原始问题
     mcp_sessions: Dict[str, ClientSession] # 必须有，用来存储 MCP sessions
-    mcp_tools: List[Dict[str, Any]] # 必须有，用来存储 MCP tools
+    mcp_tools: List[Dict[str, Any]] # 必须有，用来存储 活跃的MCP tools列表
     user_id: str
     active_agents: List[AgentCard] # 动态获取的活跃 Agent 列表
+    task_count: Annotated[int, operator.add] # 新增：并行任务计数器 (用于汇聚等待)
 
 # 【修正】添加了 Report_Generator_Worker 的描述
 def get_dynamic_supervisor_prompt(active_agents: List[AgentCard]) -> str:
@@ -63,6 +64,8 @@ def get_dynamic_supervisor_prompt(active_agents: List[AgentCard]) -> str:
 当前在线的可用的 Worker 列表：
 {agents_str}
 {next_idx}. "Report_Generator_Worker": 负责生成长篇幅（如数千字、1万字）的深度报告、带目录的分析报告。注意：一旦选择此 Worker，必须**只**返回这个 Worker。（内置能力）
+
+【并行调度机制】：如果你发现用户的请求需要整合不同领域的信息，且这些信息之间没有严格的数据前置依赖（例如：同时查询财务报表和图谱网络），**你可以且应该在 route_task 工具中一次性返回多个 Worker 作为一个列表**，系统将自动并行分发任务，提高执行效率。
 
 如果用户明确要求撰写“长报告”、“1万字报告”、“深度研究报告”，必须将任务路由给 "Report_Generator_Worker" 以启动异步生成。
 如果你认为不需要再查数据了（或者用户只是闲聊），可以返回空列表 []，系统将直接流向 FINISH 生成汇总。
@@ -141,7 +144,15 @@ def supervisor_node(state: AgentState) -> Dict[str, Any]:
             next_workers = args.get("next_workers", []) # 获取要调度的worker列表
             reason = args.get("reason", "") # 获取调度原因
             logger.info(f"    [Supervisor 决策]: 并发分发至 {next_workers} | 理由: {reason}")
-            # 注意：这里**不返回 completed_tasks**，防止Supervisor把自己的任务标记为完成
+            
+            # 【汇聚逻辑】如果是分发并行任务，则扣除对应的任务数
+            num_workers = len(next_workers)
+            if num_workers > 0 and "Report_Generator_Worker" not in next_workers:
+                return {
+                    "next_workers": next_workers, 
+                    "task_count": -num_workers # 负值预扣
+                }
+            
             return {"next_workers": next_workers}
         except Exception as e:
             logger.error(f"解析路由参数失败: {e}")
@@ -165,13 +176,33 @@ async def generic_mcp_worker(state: AgentState, worker_name: str) -> Dict[str, A
             openai_msgs.append({"role": "user", "content": m.content})
         elif isinstance(m, AIMessage):
             openai_msgs.append({"role": "assistant", "content": m.content})
+    # === 新增：基于 AgentCard 动态过滤专属工具 ===
+    allowed_tool_names = []
+    for agent in state.get("active_agents", []):
+        if agent.agent_name == worker_name:
+            allowed_tool_names = [t.get("name") for t in agent.mcp_tools_summary if "name" in t]
+            break
+    # 过滤出当前 Worker 应该拥有的工具
+    worker_tools = [
+        t for t in state.get("mcp_tools", [])
+        # 这一步是为了防止worker调用不属于它的工具，提高效率
+        if t.get("function", {}).get("name") in allowed_tool_names
+    ]
+    
+    if not worker_tools:
+        logger.warning(f"[{worker_name}] 未匹配到任何专属工具，可能导致 LLM 无法执行有效动作。")
+    # ============================================
+
     # 调用llm，根据work节点的提示词和历史消息，获取工具调用结果
-    response = _llm.chat.completions.create(
-        model=settings.deepseek_model,
-        messages=openai_msgs,
-        tools=state["mcp_tools"],
-        temperature=0.1,
-    )
+    llm_kwargs = {
+        "model": settings.deepseek_model,
+        "messages": openai_msgs,
+        "temperature": 0.1,
+    }
+    if worker_tools:
+        llm_kwargs["tools"] = worker_tools
+
+    response = _llm.chat.completions.create(**llm_kwargs)
     
     msg = response.choices[0].message
     if not msg.tool_calls:
@@ -204,8 +235,11 @@ async def generic_mcp_worker(state: AgentState, worker_name: str) -> Dict[str, A
             
     # 将results列表中的每个元素连接成一个字符串
     final_output = "\n\n".join(results)
-    # 返回结果
-    return {"messages": [AIMessage(content=f"[{worker_name} 返回]:\n{final_output}")]}
+    # 【汇聚逻辑】每个 Worker 完成后回补计数器 +1
+    return {
+        "messages": [AIMessage(content=f"[{worker_name} 返回]:\n{final_output}")],
+        "task_count": 1 # 正值回补
+    }
 
 # 工厂方法：根据 worker_name 动态生成对应的异步 Node 函数
 def create_mcp_worker_node(worker_name: str):
@@ -244,7 +278,7 @@ async def report_generator_worker_node(state: AgentState) -> Dict[str, Any]:
     msg = f"已为您自动切换到异步长报告生成模式。任务ID: `{task_id}`。\n请稍后调用 `/report/{task_id}/status` 检查进度或进行大纲审核。"
     return {"messages": [AIMessage(content=msg)]}
 
-# Summarizer 节点是合并所有worker返回结果的节点，调用llm对所有结果进行汇总
+# Summarizer 节点是合并所有worker返回结果，调用llm对所有结果进行汇总
 def summarizer_node(state: AgentState) -> Dict[str, Any]:
     logger.info("--> [Node] 真实的 Summarizer 正在汇总报告...")
     _llm = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
@@ -265,7 +299,7 @@ def summarizer_node(state: AgentState) -> Dict[str, Any]:
     response = _llm.chat.completions.create(
         model=settings.deepseek_model,
         messages=openai_msgs,
-        temperature=0.3,
+        temperature=0.3, # 0.3是为了让llm有一定自由发挥的空间，但又不会太离谱
     )
     
     final_content = response.choices[0].message.content
@@ -289,7 +323,7 @@ async def _run_planner_async(
 
     logger.info("=========== Enterprise Supervisor 启动 ===========")
     
-    # 尝试命中语义缓存（Layer 1）
+    # 尝试命中语义缓存（Layer 1）、get_exact_cache是精确匹配缓存函数
     cached_response = await get_exact_cache(user_id, question)
     if cached_response:
         return {
@@ -302,13 +336,15 @@ async def _run_planner_async(
     if not mcp_sessions or not mcp_tools:
         logger.warning("[MCP] 当前未传入全局长连接池，这可能导致部分功能受限。")
 
-    # 动态发现活跃的 Agents
+    # 动态发现活跃的 Agents、RegistryClient是redis注册中心客户端
+    # discover() 方法会扫描 Redis 中所有以 "agentcard:" 开头的键
+    # 并将它们反序列化为 AgentCard 对象列表，从而实现对其他服务（Worker）的动态发现
     active_agents = await RegistryClient.discover()
     logger.info(f"动态发现在线 Agents 数量: {len(active_agents)}")
     for a in active_agents:
         logger.info(f" - [{a.agent_name}] {a.endpoint}")
 
-    # 构建状态机
+    # 构建状态机，传入全局上下文AgentState
     workflow = StateGraph(AgentState)
     
     # 注册 Supervisor 和 内置的节点
@@ -322,11 +358,18 @@ async def _run_planner_async(
         active_agent_names.append(agent.agent_name)
         node_func = create_mcp_worker_node(agent.agent_name)
         workflow.add_node(agent.agent_name, node_func)
-        # 从该节点到 summarizer 的边
-        workflow.add_edge(agent.agent_name, "summarizer")
+        # 核心变更：Worker 执行完后回流到 Supervisor 进行计数检查
+        workflow.add_edge(agent.agent_name, "supervisor")
     
-    # 定义路由函数 (支持并发分发)
+    # 定义路由函数 (实现并行汇聚逻辑)
     def route_from_supervisor(state: AgentState):
+        # 检查计数器
+        current_tasks = state.get("task_count", 0)
+        if current_tasks < 0:
+            # 还有支流没跑完，当前分支进入 END 状态等待
+            logger.info(f"    [路由]: 计数器为 {current_tasks}，等待其他分支汇总...")
+            return END
+
         workers = state.get("next_workers", [])
         if "Report_Generator_Worker" in workers:
             return "Report_Generator_Worker"
@@ -338,14 +381,14 @@ async def _run_planner_async(
         if not valid_workers:
             return "summarizer"
             
-        # 并发 Send
+        # 并发 Send,Send的作用是把当前处理的state 发送到对应的Worker节点进行处理
         return [Send(w, state) for w in valid_workers]
 
     # 连接图
     workflow.set_entry_point("supervisor")
     
-    # 边目标节点包含所有动态节点，加上内置的 Report 和 summarizer
-    edge_destinations = active_agent_names + ["Report_Generator_Worker", "summarizer"]
+    # 边目标节点包含所有动态节点，加上内置的 Report、summarizer 和 END
+    edge_destinations = active_agent_names + ["Report_Generator_Worker", "summarizer", END]
     workflow.add_conditional_edges(
         "supervisor", 
         route_from_supervisor,
@@ -358,8 +401,9 @@ async def _run_planner_async(
     workflow.add_edge("summarizer", END)
     
     redis_client = await get_redis_client()
+    # AsyncRedisSaver是用来保存状态的，防止宕机后重新启动程序的时候，能够恢复到之前的状态
     saver = AsyncRedisSaver(redis_client)
-    
+    # compile是用来编译图的，checkpointer是用来保存状态的
     graph = workflow.compile(checkpointer=saver)
     
     # 初始化状态
@@ -371,7 +415,8 @@ async def _run_planner_async(
         "completed_tasks": [],
         "next_workers": [],
         "user_id": user_id,
-        "active_agents": active_agents
+        "active_agents": active_agents,
+        "task_count": 0 # 初始化为 0
     }
     
     # LangGraph 会话标识
@@ -409,7 +454,7 @@ async def _run_planner_async(
 def run_planner(question: str) -> Dict[str, Any]:
     """
     提供向下兼容的同步函数入口。
-    底层逻辑彻底改为基于 HTTP SSE 连接的 LangGraph 动态编排体系。
+    底层逻辑彻底改为基于 HTTP Streamable  连接的 LangGraph 动态编排体系。
     """
     try:
         return asyncio.run(_run_planner_async(question))

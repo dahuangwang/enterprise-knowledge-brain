@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 # § 1  结构化输出 Schema（所有 LLM 调用的输入/输出均显式定义）
 # ============================================================================
 
-RouteType = Literal["vector_search", "graph_search", "hybrid_search"]
+RouteType = Literal["vector_search", "graph_search", "hybrid_search", "direct_answer"]
 
 
 class NormalizedQuery(BaseModel):
@@ -42,6 +42,14 @@ class NormalizedQuery(BaseModel):
     entities: List[str] = Field(
         default_factory=list,
         description="从问题中识别出的关键实体名称列表（公司/项目名），用于图谱检索",
+    )
+    time_range: Optional[str] = Field(
+        None,
+        description="时间范围或时间约束（如 '2023年', '今年Q1'），如果没有明确时间则为null",
+    )
+    negative_constraints: Optional[str] = Field(
+        None,
+        description="排除条件或否定约束（如 '不包含子公司'、'除了A项目以外'），无则为null",
     )
     intent: str = Field(
         ...,
@@ -62,7 +70,8 @@ class RoutingDecision(BaseModel):
             "检索策略:\n"
             "  vector_search  — 语义相似度检索，适合主题/概念类问题\n"
             "  graph_search   — 实体关系图谱遍历，适合精确关系类问题\n"
-            "  hybrid_search  — 两者结合，适合复杂综合类问题"
+            "  hybrid_search  — 两者结合，适合复杂综合类问题\n"
+            "  direct_answer  — 适合无需检索的闲聊、打招呼或已有明确结论的问题"
         ),
     )
     reasoning: str = Field(
@@ -120,24 +129,32 @@ class APIAgentOutput(BaseModel):
 QUERY_REWRITE_SYSTEM: str = """\
 你是企业知识问答系统的查询分析专家，擅长处理中国上市公司相关的业务查询。
 
-你的任务是将用户口语化的提问转化为标准化的内部查询格式，输出三个字段：
-1. normalized：标准化查询语句（消除歧义，将简称补全为正式全称）
+你的任务是结合当前的【对话历史】，将用户口语化的最新提问转化为标准化的内部查询格式，输出以下字段：
+1. normalized：标准化查询语句（消除歧义，结合上下文进行指代消解，将"他/它/那家公司"补全为正式全称）
 2. entities：查询中涉及的关键实体名称列表（公司/项目/人物名等），用于图谱检索
-3. intent：一句话描述用户意图（不超过 60 字）
+3. time_range：时间范围或时间约束（如 "2023年", "今年Q1"），无明确要求则为 null
+4. negative_constraints：排除条件或否定约束（如 "排除子公司数据"），无明确要求则为 null
+5. intent：一句话描述用户意图（不超过 60 字）
 
 规则：
-- 实体名使用正式全称（"招行" → "招商银行股份有限公司"）
-- 不添加用户未提及的信息，不推断
+- 【指代消解】必须结合历史记录，将代词替换为准确的实体名称
+- 【全称补全】实体名使用正式全称（"招行" → "招商银行股份有限公司"）
 - 只输出合法 JSON，禁止 markdown 标记或解释文字\
 """
 
 QUERY_REWRITE_TEMPLATE: str = """\
+=== 对话历史 ===
+{chat_history}
+
+=== 最新问题 ===
 用户问题：{question}
 
 请以如下 JSON 格式输出（禁止其他内容）：
 {{
-  "normalized": "标准化后的查询语句",
+  "normalized": "标准化后的查询语句，包含已消解的代词",
   "entities": ["实体名称1", "实体名称2"],
+  "time_range": "时间描述或null",
+  "negative_constraints": "排除条件或null",
   "intent": "用户意图一句话描述"
 }}\
 """
@@ -159,17 +176,23 @@ ROUTE_SYSTEM: str = """\
     适用：既需要精确关系又需要语义补充的复杂问题
     典型示例："评估A项目对B公司资金链的影响", "分析公司投资组合风险"
 
+- direct_answer（直接作答/闲聊）：
+    适用：无需检索业务知识的日常问候、闲聊，或者基于已有对话常识就能回答的问题。
+    典型示例："你好", "你是谁", "谢谢"
+
 只输出合法 JSON，禁止任何解释。\
 """
 
 ROUTE_TEMPLATE: str = """\
 标准化查询：{normalized}
 识别实体：{entities}
+时间约束：{time_range}
+排除条件：{negative_constraints}
 用户意图：{intent}
 
 请以如下 JSON 格式输出（禁止其他内容）：
 {{
-  "route": "vector_search | graph_search | hybrid_search",
+  "route": "vector_search | graph_search | hybrid_search | direct_answer",
   "reasoning": "选择该策略的具体理由（不超过100字）"
 }}\
 """
@@ -180,11 +203,12 @@ SYNTHESIS_SYSTEM: str = """\
 你是严谨的企业知识问答助手，专注于基于企业知识库精准回答用户问题。
 
 核心原则（必须严格遵守）：
-1. 【忠实性】只基于下方提供的检索内容作答，严禁使用预训练知识补充或推断
+1. 【忠实性】只基于下方提供的检索内容作答，严禁使用预训练知识补充或推断。
 2. 【拒绝幻觉】若检索内容不足以回答，必须明确输出：
    "基于企业当前知识库，无法得出结论。"
-3. 【专业性】回答简洁专业，直接切入要点，避免空话套话
-4. 【可溯源】引用具体数据时标注来源（如"根据向量检索第X条"或"根据图谱关系"）\
+3. 【冲突解决】当向量检索与图谱检索存在事实冲突时，优先采信图谱检索（结构化数据），但必须在回答中指明两者的差异。
+4. 【精确溯源】引用具体数据或关系时，必须使用标准化来源标记，如：`[图谱: 公司A-投资->项目B]` 或 `[文档段落: 数字化转型战略]`。
+5. 【格式适应】如果问题属于对比分析、多项并列或涉及结构化数值（如财务报表），请优先使用 Markdown 表格进行呈现。\
 """
 
 SYNTHESIS_TEMPLATE: str = """\
@@ -196,7 +220,7 @@ SYNTHESIS_TEMPLATE: str = """\
 ═══ 图谱检索结果（实体关系数据）═══
 {graph_context}
 
-请基于以上检索内容，给出精准、客观的回答：\
+请基于以上检索内容，给出精准、客观的回答（记得添加溯源标记）：\
 """
 
 # ── 2.4 任务规划 (Planner) ────────────────────────────────────────────────────────
@@ -210,9 +234,10 @@ PLANNER_SYSTEM: str = """\
 3. `api_agent`: 负责查询企业内部系统的实时状态或执行系统侧操作（如：获取实时审批流、查询员工最新工单等）。
 
 ## 规划规则 (Planning Rules)
-1. **意图拆解**：如果用户的问题涉及多个维度（例如：“对比招商银行投资的科技项目与今年 Q1 的财务营收”），你必须将其拆解为多个并行或串行的任务。
-2. **精准路由**：不要将结构化统计（求和、极值、确切数字）交给 `graphrag_agent`，请交给 `sql_agent`。
-3. **参数提取**：为每个被调用的 Agent 准备清晰的执行指令和必要的参数。
+1. **意图拆解与 DAG 构建**：如果问题涉及多个维度，将其拆解为多个子任务。你可以设置依赖关系（dependencies），构建有向无环图 (DAG)。
+2. **并行调度 (Fan-out)**：如果多个子任务之间没有严格的数据前置依赖（例如同时查询财务SQL和图谱实体），你必须将它们平行分配，不要设置互相依赖，系统会自动并发执行它们！
+3. **精准路由**：不要将结构化统计（求和、极值、确切数字）交给 `graphrag_agent`，请交给 `sql_agent`。
+4. **参数提取**：为每个被调用的 Agent 准备清晰的执行指令和必要的参数。
 
 严格输出包含 reasoning 和 plan 的 JSON 格式，禁止输出 markdown 代码块标记以外的任何内容。\
 """
@@ -227,25 +252,25 @@ PLANNER_USER_TEMPLATE: str = """\
 # ── 2.5 SQL 执行阶段 (SQL Agent) ──────────────────────────────────────────────────
 
 SQL_AGENT_SYSTEM: str = """\
-你是一个拥有高级 SQL 技能的数据分析专家。你的任务是根据用户的需求，自动生成用于查询企业经营报表的 SQLite SQL 语句。
+你是一个拥有高级 SQL 技能的数据分析专家。你的任务是根据用户的需求，自动生成用于查询企业数据库的 SQLite SQL 语句。
 
-沙箱中有一张财务数据表 `financial_reports`，表结构如下：
-- `id` (INTEGER PRIMARY KEY)
-- `project_name` (TEXT) - 项目名称
-- `department` (TEXT) - 所属部门
-- `investment_amount` (REAL) - 投资金额（万元）
-- `revenue_q1` (REAL) - Q1营收（万元）
-- `status` (TEXT) - 运营状态
+当前数据库的 Schema 如下：
+{schema}
 
-你需要严格按照用户指令生成安全、只读（SELECT）的 SQLite 查询语句。输出必须包含 reasoning 和 sql_query 的 JSON 格式，禁止输出 markdown 标记。\
+规则：
+1. 必须严格按照上述表结构生成安全、只读（SELECT）的 SQLite 查询语句。
+2. 注意 SQLite 的方言限制（如没有 DATE_TRUNC 等特定函数，需使用 strftime）。
+3. 如果执行遭遇错误，你需要根据错误反馈调整 SQL。
+输出必须包含 reasoning 和 sql_query 的 JSON 格式，禁止输出 markdown 标记。\
 """
 
 SQL_AGENT_TEMPLATE: str = """\
 用户指令：{instruction}
+{error_feedback}
 
 请结合表结构分析需求，并按 JSON 格式输出：
 {{
-  "reasoning": "简要分析查询逻辑",
+  "reasoning": "简要分析查询逻辑及必要的表连接",
   "sql_query": "SELECT ..."
 }}\
 """
@@ -279,9 +304,12 @@ API_AGENT_TEMPLATE: str = """\
 # § 3  Prompt 构造函数
 # ============================================================================
 
-def build_rewrite_prompt(question: str) -> str:
+def build_rewrite_prompt(question: str, chat_history: str = "（无历史记录）") -> str:
     """构建查询重写的 user prompt"""
-    return QUERY_REWRITE_TEMPLATE.format(question=question)
+    return QUERY_REWRITE_TEMPLATE.format(
+        question=question,
+        chat_history=chat_history
+    )
 
 
 def build_route_prompt(normalized: NormalizedQuery) -> str:
@@ -291,9 +319,14 @@ def build_route_prompt(normalized: NormalizedQuery) -> str:
         if normalized.entities
         else "（未识别到实体）"
     )
+    time_range_str = normalized.time_range if normalized.time_range else "（无约束）"
+    neg_constraints_str = normalized.negative_constraints if normalized.negative_constraints else "（无约束）"
+    
     return ROUTE_TEMPLATE.format(
         normalized=normalized.normalized,
         entities=entities_str,
+        time_range=time_range_str,
+        negative_constraints=neg_constraints_str,
         intent=normalized.intent,
     )
 
@@ -312,9 +345,18 @@ def build_planner_prompt(question: str) -> str:
     return PLANNER_USER_TEMPLATE.format(question=question)
 
 
-def build_sql_agent_prompt(instruction: str) -> str:
-    """构建 SQL Agent 的 user prompt"""
-    return SQL_AGENT_TEMPLATE.format(instruction=instruction)
+def build_sql_agent_system_prompt(schema: str) -> str:
+    """构建 SQL Agent 的 system prompt（动态注入 Schema）"""
+    return SQL_AGENT_SYSTEM.format(schema=schema)
+
+
+def build_sql_agent_prompt(instruction: str, error_msg: Optional[str] = None) -> str:
+    """构建 SQL Agent 的 user prompt（支持纠错反馈）"""
+    error_feedback = f"\n⚠️ 上次执行报错信息，请修正你的 SQL：\n{error_msg}\n" if error_msg else ""
+    return SQL_AGENT_TEMPLATE.format(
+        instruction=instruction, 
+        error_feedback=error_feedback
+    )
 
 
 def build_api_agent_prompt(instruction: str) -> str:

@@ -47,6 +47,10 @@ class Entity(BaseModel):
         description="实体的简短描述，来自原文，不超过 100 字",
         max_length=200,
     )
+    attributes: dict = Field(
+        default_factory=dict,
+        description="实体的相关属性键值对（如注册资本、成立日期、法定代表人等）",
+    )
 
     def validate_type(self) -> bool:
         return self.entity_type in ENTITY_TYPES
@@ -105,22 +109,23 @@ class ExtractionResult(BaseModel):
 
 EXTRACTION_SYSTEM_PROMPT: str = (
     "你是一位专业的企业知识图谱构建专家，专注于从中国上市公司年报、公告和研究报告中"
-    "精准抽取实体和关系信息。\n"
+    "精准抽取实体、属性和关系信息。\n"
     "你始终严格输出合法 JSON，不添加任何 markdown 标记、注释或解释文字。\n"
     "当文本中没有符合要求的信息时，输出空列表，不要捏造内容。"
 )
 
 # 使用 .format(page=, chunk_idx=, text=) 填充
 EXTRACTION_USER_TEMPLATE: str = """\
-请从以下企业年报文本片段中，提取所有符合条件的实体和关系。
+请从以下企业年报文本片段中，提取所有符合条件的实体、属性和关系。
 
 ═══ 提取规则 ═══
 1. 【实体类型】只能是: {entity_types}
 2. 【关系类型】只能是: {relation_types}
-3. 实体 name 必须与原文完全一致，禁止缩写或改写（如"招商银行"不能写成"招行"）
-4. 只提取原文明确陈述的信息，严禁推断或补全
-5. evidence 必须是原文的直接引用，不得改写
-6. 若无符合条件的实体或关系，返回对应空列表
+3. 【属性抽取】若文本中提及实体的独立数值、状态（如注册资本、成立日期），请提取到 attributes 中。
+4. 【局部指代消解】文本切片中若出现“该公司”、“本集团”，请根据上下文推断其全称，禁止将“该公司”作为一个独立的实体抽取。实体 name 必须与原文完整名称一致。
+5. 只提取原文明确陈述的信息，严禁推断或补全
+6. evidence 必须是原文的直接引用，不得改写
+7. 若无符合条件的实体或关系，返回对应空列表
 
 ═══ 文本片段（来源: 第 {page} 页，块编号 {chunk_idx}）═══
 {text}
@@ -128,15 +133,25 @@ EXTRACTION_USER_TEMPLATE: str = """\
 ═══ 输出格式（严格 JSON，禁止其他内容）═══
 {{
   "entities": [
-    {{"name": "招商银行股份有限公司", "entity_type": "公司", "description": "全国性股份制商业银行"}},
-    {{"name": "科技创新产业园区项目", "entity_type": "项目", "description": "公司重点投资项目"}}
+    {{
+      "name": "招商银行股份有限公司", 
+      "entity_type": "公司", 
+      "description": "全国性股份制商业银行",
+      "attributes": {{"注册资本": "252亿元", "成立年份": "1987"}}
+    }},
+    {{
+      "name": "科技创新产业园区项目", 
+      "entity_type": "项目", 
+      "description": "公司重点投资项目",
+      "attributes": {{}}
+    }}
   ],
   "relations": [
     {{
       "source": "招商银行股份有限公司",
       "target": "科技创新产业园区项目",
       "relation_type": "投资",
-      "evidence": "本行于2023年向科技创新产业园区项目投入资金3.5亿元",
+      "evidence": "本行（招商银行股份有限公司）于2023年向科技创新产业园区项目投入资金3.5亿元",
       "amount": "3.5亿元"
     }}
   ]
